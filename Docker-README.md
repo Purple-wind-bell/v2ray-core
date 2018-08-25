@@ -5,7 +5,8 @@
 > 截至目前该镜像为 v2ray 最新版本
 
 ### 安装
-  docker pull wj1323246431/v2ray
+  docker pull wj1323246431/v2ray,
+  
   docker run -d --name v2ray -p 8888:10000 wj1323246431/v2ray
   
 注意： config.json文件本文件夹目录下。
