@@ -2,7 +2,6 @@ package buf
 
 import (
 	"io"
-	"net"
 
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
@@ -204,15 +203,6 @@ func (mb MultiBuffer) String() string {
 	return serial.Concat(v...)
 }
 
-// ToNetBuffers converts this MultiBuffer to net.Buffers. The return net.Buffers points to the same content of the MultiBuffer.
-func (mb MultiBuffer) ToNetBuffers() net.Buffers {
-	bs := make([][]byte, len(mb))
-	for i, b := range mb {
-		bs[i] = b.Bytes()
-	}
-	return bs
-}
-
 // SliceBySize splits the beginning of this MultiBuffer into another one, for at most size bytes.
 func (mb *MultiBuffer) SliceBySize(size int32) MultiBuffer {
 	slice := NewMultiBufferCap(10)
@@ -229,7 +219,7 @@ func (mb *MultiBuffer) SliceBySize(size int32) MultiBuffer {
 	}
 	*mb = (*mb)[endIndex:]
 	if endIndex == 0 && len(*mb) > 0 {
-		b := NewSize(size)
+		b := New()
 		common.Must(b.Reset(ReadFullFrom((*mb)[0], size)))
 		return NewMultiBufferValue(b)
 	}

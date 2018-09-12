@@ -29,19 +29,20 @@ type Listener interface {
 
 func ListenTCP(ctx context.Context, address net.Address, port net.Port, handler ConnHandler) (Listener, error) {
 	settings := StreamSettingsFromContext(ctx)
-	protocol := settings.GetEffectiveProtocol()
-	transportSettings, err := settings.GetEffectiveTransportSettings()
-	if err != nil {
-		return nil, err
-	}
-	ctx = ContextWithTransportSettings(ctx, transportSettings)
-	if settings != nil && settings.HasSecuritySettings() {
-		securitySettings, err := settings.GetEffectiveSecuritySettings()
+	if settings == nil {
+		s, err := ToMemoryStreamConfig(nil)
 		if err != nil {
-			return nil, err
+			return nil, newError("failed to create default stream settings").Base(err)
 		}
-		ctx = ContextWithSecuritySettings(ctx, securitySettings)
+		settings = s
+		ctx = ContextWithStreamSettings(ctx, settings)
 	}
+
+	if address.Family().IsDomain() && address.Domain() == "localhost" {
+		address = net.LocalHostIP
+	}
+
+	protocol := settings.ProtocolName
 	listenFunc := transportListenerCache[protocol]
 	if listenFunc == nil {
 		return nil, newError(protocol, " listener not registered.").AtError()
@@ -51,4 +52,8 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, handler 
 		return nil, newError("failed to listen on address: ", address, ":", port).Base(err)
 	}
 	return listener, nil
+}
+
+func ListenSystemTCP(ctx context.Context, addr *net.TCPAddr) (*net.TCPListener, error) {
+	return effectiveTCPListener.Listen(ctx, addr)
 }

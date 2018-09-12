@@ -1,4 +1,4 @@
-// +build windows
+// +build wasm
 
 package buf
 
@@ -10,5 +10,5 @@ import (
 const useReadv = false
 
 func NewReadVReader(reader io.Reader, rawConn syscall.RawConn) Reader {
-	panic("Shoud not happen")
+	panic("not implemented")
 }

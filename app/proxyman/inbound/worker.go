@@ -2,7 +2,6 @@ package inbound
 
 import (
 	"context"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/tcp"
 	"v2ray.com/core/transport/internet/udp"
+	"v2ray.com/core/transport/pipe"
 )
 
 type worker interface {
@@ -33,7 +33,7 @@ type tcpWorker struct {
 	address         net.Address
 	port            net.Port
 	proxy           proxy.Inbound
-	stream          *internet.StreamConfig
+	stream          *internet.MemoryStreamConfig
 	recvOrigDest    bool
 	tag             string
 	dispatcher      core.Dispatcher
@@ -121,7 +121,8 @@ func (w *tcpWorker) Port() net.Port {
 
 type udpConn struct {
 	lastActivityTime int64 // in seconds
-	input            chan *buf.Buffer
+	reader           buf.Reader
+	writer           buf.Writer
 	output           func([]byte) (int, error)
 	remote           net.Addr
 	local            net.Addr
@@ -136,50 +137,21 @@ func (c *udpConn) updateActivity() {
 
 // ReadMultiBuffer implements buf.Reader
 func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
-	var payload buf.MultiBuffer
-
-	select {
-	case in := <-c.input:
-		payload.Append(in)
-	default:
-		select {
-		case in := <-c.input:
-			payload.Append(in)
-		case <-c.done.Wait():
-			return nil, io.EOF
-		}
+	mb, err := c.reader.ReadMultiBuffer()
+	if err != nil {
+		return nil, err
 	}
-
-L:
-	for {
-		select {
-		case in := <-c.input:
-			payload.Append(in)
-		default:
-			break L
-		}
-	}
+	c.updateActivity()
 
 	if c.uplink != nil {
-		c.uplink.Add(int64(payload.Len()))
+		c.uplink.Add(int64(mb.Len()))
 	}
 
-	return payload, nil
+	return mb, nil
 }
 
 func (c *udpConn) Read(buf []byte) (int, error) {
-	select {
-	case in := <-c.input:
-		defer in.Release()
-		c.updateActivity()
-		nBytes := copy(buf, in.Bytes())
-		if c.uplink != nil {
-			c.uplink.Add(int64(nBytes))
-		}
-		return nBytes, nil
-	case <-c.done.Wait():
-		return 0, io.EOF
-	}
+	panic("not implemented")
 }
 
 // Write implements io.Writer.
@@ -196,6 +168,7 @@ func (c *udpConn) Write(buf []byte) (int, error) {
 
 func (c *udpConn) Close() error {
 	common.Must(c.done.Close())
+	common.Must(common.Close(c.writer))
 	return nil
 }
 
@@ -249,8 +222,10 @@ func (w *udpWorker) getConnection(id connID) (*udpConn, bool) {
 		return conn, true
 	}
 
+	pReader, pWriter := pipe.New(pipe.DiscardOverflow(), pipe.WithSizeLimit(16*1024))
 	conn := &udpConn{
-		input: make(chan *buf.Buffer, 32),
+		reader: pReader,
+		writer: pWriter,
 		output: func(b []byte) (int, error) {
 			return w.hub.WriteTo(b, id.src)
 		},
@@ -280,15 +255,13 @@ func (w *udpWorker) callback(b *buf.Buffer, source net.Destination, originalDest
 		id.dest = originalDest
 	}
 	conn, existing := w.getConnection(id)
-	select {
-	case conn.input <- b:
-	case <-conn.done.Wait():
-		b.Release()
-	default:
-		b.Release()
-	}
+
+	// payload will be discarded in pipe is full.
+	conn.writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)) // nolint: errcheck
 
 	if !existing {
+		common.Must(w.checker.Start())
+
 		go func() {
 			ctx := context.Background()
 			sid := session.NewID()
@@ -324,40 +297,41 @@ func (w *udpWorker) handlePackets() {
 	}
 }
 
+func (w *udpWorker) clean() error {
+	nowSec := time.Now().Unix()
+	w.Lock()
+	defer w.Unlock()
+
+	if len(w.activeConn) == 0 {
+		return newError("no more connections. stopping...")
+	}
+
+	for addr, conn := range w.activeConn {
+		if nowSec-atomic.LoadInt64(&conn.lastActivityTime) > 8 {
+			delete(w.activeConn, addr)
+			conn.Close() // nolint: errcheck
+		}
+	}
+
+	if len(w.activeConn) == 0 {
+		w.activeConn = make(map[connID]*udpConn, 16)
+	}
+
+	return nil
+}
+
 func (w *udpWorker) Start() error {
 	w.activeConn = make(map[connID]*udpConn, 16)
 	h, err := udp.ListenUDP(w.address, w.port, udp.HubReceiveOriginalDestination(w.recvOrigDest), udp.HubCapacity(256))
 	if err != nil {
 		return err
 	}
+
 	w.checker = &task.Periodic{
 		Interval: time.Second * 16,
-		Execute: func() error {
-			nowSec := time.Now().Unix()
-			w.Lock()
-			defer w.Unlock()
-
-			if len(w.activeConn) == 0 {
-				return nil
-			}
-
-			for addr, conn := range w.activeConn {
-				if nowSec-atomic.LoadInt64(&conn.lastActivityTime) > 8 {
-					delete(w.activeConn, addr)
-					conn.Close() // nolint: errcheck
-				}
-			}
-
-			if len(w.activeConn) == 0 {
-				w.activeConn = make(map[connID]*udpConn, 16)
-			}
-
-			return nil
-		},
+		Execute:  w.clean,
 	}
-	if err := w.checker.Start(); err != nil {
-		return err
-	}
+
 	w.hub = h
 	go w.handlePackets()
 	return nil

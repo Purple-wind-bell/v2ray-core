@@ -27,12 +27,8 @@ var addrParser = protocol.NewAddressParser(
 )
 
 // ReadTCPSession reads a Shadowsocks TCP session from the given reader, returns its header and remaining parts.
-func ReadTCPSession(user *protocol.User, reader io.Reader) (*protocol.RequestHeader, buf.Reader, error) {
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, nil, newError("failed to parse account").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+func ReadTCPSession(user *protocol.MemoryUser, reader io.Reader) (*protocol.RequestHeader, buf.Reader, error) {
+	account := user.Account.(*MemoryAccount)
 
 	buffer := buf.New()
 	defer buffer.Release()
@@ -103,8 +99,6 @@ func ReadTCPSession(user *protocol.User, reader io.Reader) (*protocol.RequestHea
 		return nil, nil, newError("invalid remote address.")
 	}
 
-	br.Direct = true
-
 	var chunkReader buf.Reader
 	if request.Option.Has(RequestOptionOneTimeAuth) {
 		chunkReader = NewChunkReader(br, NewAuthenticator(ChunkKeyGenerator(iv)))
@@ -118,11 +112,7 @@ func ReadTCPSession(user *protocol.User, reader io.Reader) (*protocol.RequestHea
 // WriteTCPRequest writes Shadowsocks request into the given writer, and returns a writer for body.
 func WriteTCPRequest(request *protocol.RequestHeader, writer io.Writer) (buf.Writer, error) {
 	user := request.User
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, newError("failed to parse account").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+	account := user.Account.(*MemoryAccount)
 
 	if account.Cipher.IsAEAD() {
 		request.Option.Clear(RequestOptionOneTimeAuth)
@@ -169,17 +159,13 @@ func WriteTCPRequest(request *protocol.RequestHeader, writer io.Writer) (buf.Wri
 	return chunkWriter, nil
 }
 
-func ReadTCPResponse(user *protocol.User, reader io.Reader) (buf.Reader, error) {
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, newError("failed to parse account").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+func ReadTCPResponse(user *protocol.MemoryUser, reader io.Reader) (buf.Reader, error) {
+	account := user.Account.(*MemoryAccount)
 
 	var iv []byte
 	if account.Cipher.IVSize() > 0 {
 		iv = make([]byte, account.Cipher.IVSize())
-		if _, err = io.ReadFull(reader, iv); err != nil {
+		if _, err := io.ReadFull(reader, iv); err != nil {
 			return nil, newError("failed to read IV").Base(err)
 		}
 	}
@@ -189,11 +175,7 @@ func ReadTCPResponse(user *protocol.User, reader io.Reader) (buf.Reader, error) 
 
 func WriteTCPResponse(request *protocol.RequestHeader, writer io.Writer) (buf.Writer, error) {
 	user := request.User
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, newError("failed to parse account.").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+	account := user.Account.(*MemoryAccount)
 
 	var iv []byte
 	if account.Cipher.IVSize() > 0 {
@@ -209,11 +191,7 @@ func WriteTCPResponse(request *protocol.RequestHeader, writer io.Writer) (buf.Wr
 
 func EncodeUDPPacket(request *protocol.RequestHeader, payload []byte) (*buf.Buffer, error) {
 	user := request.User
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, newError("failed to parse account.").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+	account := user.Account.(*MemoryAccount)
 
 	buffer := buf.New()
 	ivLen := account.Cipher.IVSize()
@@ -241,12 +219,8 @@ func EncodeUDPPacket(request *protocol.RequestHeader, payload []byte) (*buf.Buff
 	return buffer, nil
 }
 
-func DecodeUDPPacket(user *protocol.User, payload *buf.Buffer) (*protocol.RequestHeader, *buf.Buffer, error) {
-	rawAccount, err := user.GetTypedAccount()
-	if err != nil {
-		return nil, nil, newError("failed to parse account").Base(err).AtError()
-	}
-	account := rawAccount.(*MemoryAccount)
+func DecodeUDPPacket(user *protocol.MemoryUser, payload *buf.Buffer) (*protocol.RequestHeader, *buf.Buffer, error) {
+	account := user.Account.(*MemoryAccount)
 
 	var iv []byte
 	if !account.Cipher.IsAEAD() && account.Cipher.IVSize() > 0 {
@@ -308,7 +282,7 @@ func DecodeUDPPacket(user *protocol.User, payload *buf.Buffer) (*protocol.Reques
 
 type UDPReader struct {
 	Reader io.Reader
-	User   *protocol.User
+	User   *protocol.MemoryUser
 }
 
 func (v *UDPReader) ReadMultiBuffer() (buf.MultiBuffer, error) {

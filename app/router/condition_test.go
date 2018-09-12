@@ -126,11 +126,11 @@ func TestRoutingRule(t *testing.T) {
 			},
 			test: []ruleTest{
 				{
-					input:  protocol.ContextWithUser(context.Background(), &protocol.User{Email: "admin@v2ray.com"}),
+					input:  protocol.ContextWithUser(context.Background(), &protocol.MemoryUser{Email: "admin@v2ray.com"}),
 					output: true,
 				},
 				{
-					input:  protocol.ContextWithUser(context.Background(), &protocol.User{Email: "love@v2ray.com"}),
+					input:  protocol.ContextWithUser(context.Background(), &protocol.MemoryUser{Email: "love@v2ray.com"}),
 					output: false,
 				},
 				{
@@ -189,10 +189,8 @@ func TestChinaSites(t *testing.T) {
 	domains, err := loadGeoSite("CN")
 	assert(err, IsNil)
 
-	matcher := NewCachableDomainMatcher()
-	for _, d := range domains {
-		assert(matcher.Add(d), IsNil)
-	}
+	matcher, err := NewDomainMatcher(domains)
+	common.Must(err)
 
 	assert(matcher.ApplyDomain("163.com"), IsTrue)
 	assert(matcher.ApplyDomain("163.com"), IsTrue)

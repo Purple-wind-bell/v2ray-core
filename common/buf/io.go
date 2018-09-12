@@ -70,7 +70,9 @@ func NewReader(reader io.Reader) Reader {
 		}
 	}
 
-	return NewBytesToBufferReader(reader)
+	return &SingleReader{
+		Reader: reader,
+	}
 }
 
 // NewWriter creates a new Writer.

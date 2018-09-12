@@ -2,6 +2,13 @@ package buf
 
 import (
 	"io"
+
+	"v2ray.com/core/common/bytespool"
+)
+
+const (
+	// Size of a regular buffer.
+	Size = 2048
 )
 
 // Supplier is a writer that writes contents into the given buffer.
@@ -11,8 +18,7 @@ type Supplier func([]byte) (int, error)
 // the buffer into an internal buffer pool, in order to recreate a buffer more
 // quickly.
 type Buffer struct {
-	v []byte
-
+	v     []byte
 	start int32
 	end   int32
 }
@@ -22,10 +28,9 @@ func (b *Buffer) Release() {
 	if b == nil || b.v == nil {
 		return
 	}
-	freeBytes(b.v)
+	pool.Put(b.v)
 	b.v = nil
-	b.start = 0
-	b.end = 0
+	b.Clear()
 }
 
 // Clear clears the content of the buffer, results an empty buffer with
@@ -62,6 +67,9 @@ func (b *Buffer) Reset(writer Supplier) error {
 	nBytes, err := writer(b.v)
 	b.start = 0
 	b.end = int32(nBytes)
+	if b.end > int32(len(b.v)) {
+		b.end = int32(len(b.v))
+	}
 	return err
 }
 
@@ -164,16 +172,11 @@ func (b *Buffer) String() string {
 	return string(b.Bytes())
 }
 
+var pool = bytespool.GetPool(Size)
+
 // New creates a Buffer with 0 length and 2K capacity.
 func New() *Buffer {
 	return &Buffer{
-		v: pool[0].Get().([]byte),
-	}
-}
-
-// NewSize creates and returns a buffer with 0 length and at least the given capacity. Capacity must be positive.
-func NewSize(capacity int32) *Buffer {
-	return &Buffer{
-		v: newBytes(capacity),
+		v: pool.Get().([]byte),
 	}
 }

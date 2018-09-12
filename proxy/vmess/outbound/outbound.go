@@ -33,7 +33,11 @@ type Handler struct {
 func New(ctx context.Context, config *Config) (*Handler, error) {
 	serverList := protocol.NewServerList()
 	for _, rec := range config.Receiver {
-		serverList.AddServer(protocol.NewServerSpecFromPB(*rec))
+		s, err := protocol.NewServerSpecFromPB(*rec)
+		if err != nil {
+			return nil, newError("failed to parse server spec").Base(err)
+		}
+		serverList.AddServer(s)
 	}
 	handler := &Handler{
 		serverList:   serverList,
@@ -87,11 +91,7 @@ func (v *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 		Option:  protocol.RequestOptionChunkStream,
 	}
 
-	rawAccount, err := request.User.GetTypedAccount()
-	if err != nil {
-		return newError("failed to get user account").Base(err).AtWarning()
-	}
-	account := rawAccount.(*vmess.InternalAccount)
+	account := request.User.Account.(*vmess.InternalAccount)
 	request.Security = account.Security
 
 	if request.Security == protocol.SecurityType_AES128_GCM || request.Security == protocol.SecurityType_NONE || request.Security == protocol.SecurityType_CHACHA20_POLY1305 {
@@ -106,6 +106,8 @@ func (v *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 	output := link.Writer
 
 	session := encoding.NewClientSession(protocol.DefaultIDHash)
+	defer encoding.ReleaseClientSession(session)
+
 	sessionPolicy := v.v.PolicyManager().ForLevel(request.User.Level)
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -120,7 +122,7 @@ func (v *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 		}
 
 		bodyWriter := session.EncodeRequestBody(request, writer)
-		if err := buf.CopyOnceTimeout(input, bodyWriter, time.Millisecond*500); err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
+		if err := buf.CopyOnceTimeout(input, bodyWriter, time.Millisecond*100); err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
 			return newError("failed to write first payload").Base(err)
 		}
 
@@ -144,23 +146,13 @@ func (v *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 	responseDone := func() error {
 		defer timer.SetTimeout(sessionPolicy.Timeouts.UplinkOnly)
 
-		var reader *buf.BufferedReader
-		{
-			var r buf.Reader
-			if sessionPolicy.Buffer.PerConnection == 0 {
-				r = &buf.SingleReader{Reader: conn}
-			} else {
-				r = buf.NewReader(conn)
-			}
-			reader = &buf.BufferedReader{Reader: r}
-		}
+		reader := &buf.BufferedReader{Reader: buf.NewReader(conn)}
 		header, err := session.DecodeResponseHeader(reader)
 		if err != nil {
 			return newError("failed to read header").Base(err)
 		}
 		v.handleCommand(rec.Destination(), header.Command)
 
-		reader.Direct = true
 		bodyReader := session.DecodeResponseBody(request, reader)
 
 		return buf.Copy(bodyReader, output, buf.UpdateActivity(timer))

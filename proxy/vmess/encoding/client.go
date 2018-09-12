@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"hash/fnv"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 
@@ -40,12 +41,16 @@ type ClientSession struct {
 	responseHeader  byte
 }
 
+var clientSessionPool = sync.Pool{
+	New: func() interface{} { return &ClientSession{} },
+}
+
 // NewClientSession creates a new ClientSession.
 func NewClientSession(idHash protocol.IDHash) *ClientSession {
 	randomBytes := make([]byte, 33) // 16 + 16 + 1
 	common.Must2(rand.Read(randomBytes))
 
-	session := &ClientSession{}
+	session := clientSessionPool.Get().(*ClientSession)
 	copy(session.requestBodyKey[:], randomBytes[:16])
 	copy(session.requestBodyIV[:], randomBytes[16:32])
 	session.responseHeader = randomBytes[32]
@@ -56,13 +61,16 @@ func NewClientSession(idHash protocol.IDHash) *ClientSession {
 	return session
 }
 
+func ReleaseClientSession(session *ClientSession) {
+	session.idHash = nil
+	session.responseReader = nil
+	clientSessionPool.Put(session)
+}
+
 func (c *ClientSession) EncodeRequestHeader(header *protocol.RequestHeader, writer io.Writer) error {
 	timestamp := protocol.NewTimestampGenerator(protocol.NowTime(), 30)()
-	account, err := header.User.GetTypedAccount()
-	if err != nil {
-		return newError("failed to get user account: ", err).AtError()
-	}
-	idHash := c.idHash(account.(*vmess.InternalAccount).AnyValidID().Bytes())
+	account := header.User.Account.(*vmess.InternalAccount)
+	idHash := c.idHash(account.AnyValidID().Bytes())
 	common.Must2(idHash.Write(timestamp.Bytes(nil)))
 	common.Must2(writer.Write(idHash.Sum(nil)))
 
@@ -97,7 +105,7 @@ func (c *ClientSession) EncodeRequestHeader(header *protocol.RequestHeader, writ
 	timestampHash := md5.New()
 	common.Must2(timestampHash.Write(hashTimestamp(timestamp)))
 	iv := timestampHash.Sum(nil)
-	aesStream := crypto.NewAesEncryptionStream(account.(*vmess.InternalAccount).ID.CmdKey(), iv)
+	aesStream := crypto.NewAesEncryptionStream(account.ID.CmdKey(), iv)
 	aesStream.XORKeyStream(buffer.Bytes(), buffer.Bytes())
 	common.Must2(writer.Write(buffer.Bytes()))
 	return nil

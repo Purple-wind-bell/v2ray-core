@@ -23,72 +23,12 @@ func readOne(r io.Reader) (*Buffer, error) {
 	return nil, newError("Reader returns too many empty payloads.")
 }
 
-// BytesToBufferReader is a Reader that adjusts its reading speed automatically.
-type BytesToBufferReader struct {
-	io.Reader
-	buffer []byte
-}
-
-// NewBytesToBufferReader returns a new BytesToBufferReader.
-func NewBytesToBufferReader(reader io.Reader) Reader {
-	return &BytesToBufferReader{
-		Reader: reader,
-	}
-}
-
-func (r *BytesToBufferReader) readSmall() (MultiBuffer, error) {
-	b, err := readOne(r.Reader)
-	if err != nil {
-		return nil, err
-	}
-	if b.IsFull() && largeSize > Size {
-		r.buffer = newBytes(Size + 1)
-	}
-	return NewMultiBufferValue(b), nil
-}
-
-func (r *BytesToBufferReader) freeBuffer() {
-	freeBytes(r.buffer)
-	r.buffer = nil
-}
-
-// ReadMultiBuffer implements Reader.
-func (r *BytesToBufferReader) ReadMultiBuffer() (MultiBuffer, error) {
-	if r.buffer == nil || largeSize == Size {
-		return r.readSmall()
-	}
-
-	nBytes, err := r.Reader.Read(r.buffer)
-	if nBytes > 0 {
-		mb := NewMultiBufferCap(int32(nBytes/Size) + 1)
-		common.Must2(mb.Write(r.buffer[:nBytes]))
-		if nBytes == len(r.buffer) && nBytes < int(largeSize) {
-			freeBytes(r.buffer)
-			r.buffer = newBytes(int32(nBytes) + 1)
-		} else if nBytes < Size {
-			r.freeBuffer()
-		}
-		return mb, nil
-	}
-
-	r.freeBuffer()
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Read() returns empty payload and nil err. We don't expect this to happen, but just in case.
-	return r.readSmall()
-}
-
 // BufferedReader is a Reader that keeps its internal buffer.
 type BufferedReader struct {
 	// Reader is the underlying reader to be read from
 	Reader Reader
 	// Buffer is the internal buffer to be read from first
 	Buffer MultiBuffer
-	// Direct indicates whether or not to use the internal buffer
-	Direct bool
 }
 
 // BufferedBytes returns the number of bytes that is cached in this reader.
@@ -113,12 +53,6 @@ func (r *BufferedReader) Read(b []byte) (int, error) {
 			r.Buffer = nil
 		}
 		return nBytes, nil
-	}
-
-	if r.Direct {
-		if reader, ok := r.Reader.(io.Reader); ok {
-			return reader.Read(b)
-		}
 	}
 
 	mb, err := r.Reader.ReadMultiBuffer()
