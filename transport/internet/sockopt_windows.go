@@ -42,3 +42,7 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 
 	return nil
 }
+
+func bindAddr(fd uintptr, ip []byte, port uint32) error {
+	return nil
+}

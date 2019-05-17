@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"v2ray.com/core"
 	"v2ray.com/core/app/proxyman"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
@@ -15,6 +14,8 @@ import (
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal/done"
 	"v2ray.com/core/common/task"
+	"v2ray.com/core/features/routing"
+	"v2ray.com/core/features/stats"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/tcp"
@@ -36,12 +37,19 @@ type tcpWorker struct {
 	stream          *internet.MemoryStreamConfig
 	recvOrigDest    bool
 	tag             string
-	dispatcher      core.Dispatcher
+	dispatcher      routing.Dispatcher
 	sniffingConfig  *proxyman.SniffingConfig
-	uplinkCounter   core.StatCounter
-	downlinkCounter core.StatCounter
+	uplinkCounter   stats.Counter
+	downlinkCounter stats.Counter
 
 	hub internet.Listener
+}
+
+func getTProxyType(s *internet.MemoryStreamConfig) internet.SocketConfig_TProxyMode {
+	if s == nil || s.SocketSettings == nil {
+		return internet.SocketConfig_Off
+	}
+	return s.SocketSettings.Tproxy
 }
 
 func (w *tcpWorker) callback(conn internet.Connection) {
@@ -50,22 +58,35 @@ func (w *tcpWorker) callback(conn internet.Connection) {
 	ctx = session.ContextWithID(ctx, sid)
 
 	if w.recvOrigDest {
-		dest, err := tcp.GetOriginalDestination(conn)
-		if err != nil {
-			newError("failed to get original destination").Base(err).WriteToLog(session.ExportIDToError(ctx))
+		var dest net.Destination
+		switch getTProxyType(w.stream) {
+		case internet.SocketConfig_Redirect:
+			d, err := tcp.GetOriginalDestination(conn)
+			if err != nil {
+				newError("failed to get original destination").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			} else {
+				dest = d
+			}
+		case internet.SocketConfig_TProxy:
+			dest = net.DestinationFromAddr(conn.LocalAddr())
 		}
 		if dest.IsValid() {
-			ctx = proxy.ContextWithOriginalTarget(ctx, dest)
+			ctx = session.ContextWithOutbound(ctx, &session.Outbound{
+				Target: dest,
+			})
 		}
 	}
-	if len(w.tag) > 0 {
-		ctx = proxy.ContextWithInboundTag(ctx, w.tag)
-	}
-	ctx = proxy.ContextWithInboundEntryPoint(ctx, net.TCPDestination(w.address, w.port))
-	ctx = proxy.ContextWithSource(ctx, net.DestinationFromAddr(conn.RemoteAddr()))
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{
+		Source:  net.DestinationFromAddr(conn.RemoteAddr()),
+		Gateway: net.TCPDestination(w.address, w.port),
+		Tag:     w.tag,
+	})
+	content := new(session.Content)
 	if w.sniffingConfig != nil {
-		ctx = proxyman.ContextWithSniffingConfig(ctx, w.sniffingConfig)
+		content.SniffingRequest.Enabled = w.sniffingConfig.Enabled
+		content.SniffingRequest.OverrideDestinationForProtocol = w.sniffingConfig.DestinationOverride
 	}
+	ctx = session.ContextWithContent(ctx, content)
 	if w.uplinkCounter != nil || w.downlinkCounter != nil {
 		conn = &internet.StatCouterConnection{
 			Connection: conn,
@@ -87,8 +108,8 @@ func (w *tcpWorker) Proxy() proxy.Inbound {
 }
 
 func (w *tcpWorker) Start() error {
-	ctx := internet.ContextWithStreamSettings(context.Background(), w.stream)
-	hub, err := internet.ListenTCP(ctx, w.address, w.port, func(conn internet.Connection) {
+	ctx := context.Background()
+	hub, err := internet.ListenTCP(ctx, w.address, w.port, w.stream, func(conn internet.Connection) {
 		go w.callback(conn)
 	})
 	if err != nil {
@@ -127,8 +148,8 @@ type udpConn struct {
 	remote           net.Addr
 	local            net.Addr
 	done             *done.Instance
-	uplink           core.StatCounter
-	downlink         core.StatCounter
+	uplink           stats.Counter
+	downlink         stats.Counter
 }
 
 func (c *udpConn) updateActivity() {
@@ -204,11 +225,11 @@ type udpWorker struct {
 	hub             *udp.Hub
 	address         net.Address
 	port            net.Port
-	recvOrigDest    bool
 	tag             string
-	dispatcher      core.Dispatcher
-	uplinkCounter   core.StatCounter
-	downlinkCounter core.StatCounter
+	stream          *internet.MemoryStreamConfig
+	dispatcher      routing.Dispatcher
+	uplinkCounter   stats.Counter
+	downlinkCounter stats.Counter
 
 	checker    *task.Periodic
 	activeConn map[connID]*udpConn
@@ -257,7 +278,7 @@ func (w *udpWorker) callback(b *buf.Buffer, source net.Destination, originalDest
 	conn, existing := w.getConnection(id)
 
 	// payload will be discarded in pipe is full.
-	conn.writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)) // nolint: errcheck
+	conn.writer.WriteMultiBuffer(buf.MultiBuffer{b}) // nolint: errcheck
 
 	if !existing {
 		common.Must(w.checker.Start())
@@ -268,15 +289,17 @@ func (w *udpWorker) callback(b *buf.Buffer, source net.Destination, originalDest
 			ctx = session.ContextWithID(ctx, sid)
 
 			if originalDest.IsValid() {
-				ctx = proxy.ContextWithOriginalTarget(ctx, originalDest)
+				ctx = session.ContextWithOutbound(ctx, &session.Outbound{
+					Target: originalDest,
+				})
 			}
-			if len(w.tag) > 0 {
-				ctx = proxy.ContextWithInboundTag(ctx, w.tag)
-			}
-			ctx = proxy.ContextWithSource(ctx, source)
-			ctx = proxy.ContextWithInboundEntryPoint(ctx, net.UDPDestination(w.address, w.port))
+			ctx = session.ContextWithInbound(ctx, &session.Inbound{
+				Source:  source,
+				Gateway: net.UDPDestination(w.address, w.port),
+				Tag:     w.tag,
+			})
 			if err := w.proxy.Process(ctx, net.Network_UDP, conn, w.dispatcher); err != nil {
-				newError("connection ends").Base(err).WriteToLog()
+				newError("connection ends").Base(err).WriteToLog(session.ExportIDToError(ctx))
 			}
 			conn.Close() // nolint: errcheck
 			w.removeConn(id)
@@ -293,7 +316,7 @@ func (w *udpWorker) removeConn(id connID) {
 func (w *udpWorker) handlePackets() {
 	receive := w.hub.Receive()
 	for payload := range receive {
-		w.callback(payload.Content, payload.Source, payload.OriginalDestination)
+		w.callback(payload.Payload, payload.Source, payload.Target)
 	}
 }
 
@@ -322,7 +345,8 @@ func (w *udpWorker) clean() error {
 
 func (w *udpWorker) Start() error {
 	w.activeConn = make(map[connID]*udpConn, 16)
-	h, err := udp.ListenUDP(w.address, w.port, udp.HubReceiveOriginalDestination(w.recvOrigDest), udp.HubCapacity(256))
+	ctx := context.Background()
+	h, err := udp.ListenUDP(ctx, w.address, w.port, w.stream, udp.HubCapacity(256))
 	if err != nil {
 		return err
 	}

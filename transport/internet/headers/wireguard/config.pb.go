@@ -1,8 +1,10 @@
 package wireguard
 
-import proto "github.com/golang/protobuf/proto"
-import fmt "fmt"
-import math "math"
+import (
+	fmt "fmt"
+	proto "github.com/golang/protobuf/proto"
+	math "math"
+)
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -13,7 +15,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
+const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
 type WireguardConfig struct {
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
@@ -25,16 +27,17 @@ func (m *WireguardConfig) Reset()         { *m = WireguardConfig{} }
 func (m *WireguardConfig) String() string { return proto.CompactTextString(m) }
 func (*WireguardConfig) ProtoMessage()    {}
 func (*WireguardConfig) Descriptor() ([]byte, []int) {
-	return fileDescriptor_config_20d981d9a887b445, []int{0}
+	return fileDescriptor_a4c21f616af3c531, []int{0}
 }
+
 func (m *WireguardConfig) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_WireguardConfig.Unmarshal(m, b)
 }
 func (m *WireguardConfig) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	return xxx_messageInfo_WireguardConfig.Marshal(b, m, deterministic)
 }
-func (dst *WireguardConfig) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_WireguardConfig.Merge(dst, src)
+func (m *WireguardConfig) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_WireguardConfig.Merge(m, src)
 }
 func (m *WireguardConfig) XXX_Size() int {
 	return xxx_messageInfo_WireguardConfig.Size(m)
@@ -50,10 +53,10 @@ func init() {
 }
 
 func init() {
-	proto.RegisterFile("v2ray.com/core/transport/internet/headers/wireguard/config.proto", fileDescriptor_config_20d981d9a887b445)
+	proto.RegisterFile("v2ray.com/core/transport/internet/headers/wireguard/config.proto", fileDescriptor_a4c21f616af3c531)
 }
 
-var fileDescriptor_config_20d981d9a887b445 = []byte{
+var fileDescriptor_a4c21f616af3c531 = []byte{
 	// 163 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x72, 0x28, 0x33, 0x2a, 0x4a,
 	0xac, 0xd4, 0x4b, 0xce, 0xcf, 0xd5, 0x4f, 0xce, 0x2f, 0x4a, 0xd5, 0x2f, 0x29, 0x4a, 0xcc, 0x2b,

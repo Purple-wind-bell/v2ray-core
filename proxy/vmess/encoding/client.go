@@ -1,13 +1,12 @@
 package encoding
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
+	"encoding/binary"
+	"hash"
 	"hash/fnv"
 	"io"
-	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 
@@ -21,13 +20,12 @@ import (
 	"v2ray.com/core/proxy/vmess"
 )
 
-func hashTimestamp(t protocol.Timestamp) []byte {
-	bytes := make([]byte, 0, 32)
-	bytes = t.Bytes(bytes)
-	bytes = t.Bytes(bytes)
-	bytes = t.Bytes(bytes)
-	bytes = t.Bytes(bytes)
-	return bytes
+func hashTimestamp(h hash.Hash, t protocol.Timestamp) []byte {
+	common.Must2(serial.WriteUint64(h, uint64(t)))
+	common.Must2(serial.WriteUint64(h, uint64(t)))
+	common.Must2(serial.WriteUint64(h, uint64(t)))
+	common.Must2(serial.WriteUint64(h, uint64(t)))
+	return h.Sum(nil)
 }
 
 // ClientSession stores connection session info for VMess client.
@@ -41,16 +39,12 @@ type ClientSession struct {
 	responseHeader  byte
 }
 
-var clientSessionPool = sync.Pool{
-	New: func() interface{} { return &ClientSession{} },
-}
-
 // NewClientSession creates a new ClientSession.
 func NewClientSession(idHash protocol.IDHash) *ClientSession {
 	randomBytes := make([]byte, 33) // 16 + 16 + 1
 	common.Must2(rand.Read(randomBytes))
 
-	session := clientSessionPool.Get().(*ClientSession)
+	session := &ClientSession{}
 	copy(session.requestBodyKey[:], randomBytes[:16])
 	copy(session.requestBodyIV[:], randomBytes[16:32])
 	session.responseHeader = randomBytes[32]
@@ -61,30 +55,25 @@ func NewClientSession(idHash protocol.IDHash) *ClientSession {
 	return session
 }
 
-func ReleaseClientSession(session *ClientSession) {
-	session.idHash = nil
-	session.responseReader = nil
-	clientSessionPool.Put(session)
-}
-
 func (c *ClientSession) EncodeRequestHeader(header *protocol.RequestHeader, writer io.Writer) error {
 	timestamp := protocol.NewTimestampGenerator(protocol.NowTime(), 30)()
-	account := header.User.Account.(*vmess.InternalAccount)
+	account := header.User.Account.(*vmess.MemoryAccount)
 	idHash := c.idHash(account.AnyValidID().Bytes())
-	common.Must2(idHash.Write(timestamp.Bytes(nil)))
+	common.Must2(serial.WriteUint64(idHash, uint64(timestamp)))
 	common.Must2(writer.Write(idHash.Sum(nil)))
 
 	buffer := buf.New()
 	defer buffer.Release()
 
-	common.Must2(buffer.WriteBytes(Version))
+	common.Must(buffer.WriteByte(Version))
 	common.Must2(buffer.Write(c.requestBodyIV[:]))
 	common.Must2(buffer.Write(c.requestBodyKey[:]))
-	common.Must2(buffer.WriteBytes(c.responseHeader, byte(header.Option)))
+	common.Must(buffer.WriteByte(c.responseHeader))
+	common.Must(buffer.WriteByte(byte(header.Option)))
 
 	padingLen := dice.Roll(16)
 	security := byte(padingLen<<4) | byte(header.Security)
-	common.Must2(buffer.WriteBytes(security, byte(0), byte(header.Command)))
+	common.Must2(buffer.Write([]byte{security, byte(0), byte(header.Command)}))
 
 	if header.Command != protocol.RequestCommandMux {
 		if err := addrParser.WriteAddressPort(buffer, header.Address, header.Port); err != nil {
@@ -93,19 +82,18 @@ func (c *ClientSession) EncodeRequestHeader(header *protocol.RequestHeader, writ
 	}
 
 	if padingLen > 0 {
-		common.Must(buffer.AppendSupplier(buf.ReadFullFrom(rand.Reader, int32(padingLen))))
+		common.Must2(buffer.ReadFullFrom(rand.Reader, int32(padingLen)))
 	}
 
 	{
 		fnv1a := fnv.New32a()
 		common.Must2(fnv1a.Write(buffer.Bytes()))
-		common.Must(buffer.AppendSupplier(serial.WriteHash(fnv1a)))
+		hashBytes := buffer.Extend(int32(fnv1a.Size()))
+		fnv1a.Sum(hashBytes[:0])
 	}
 
-	timestampHash := md5.New()
-	common.Must2(timestampHash.Write(hashTimestamp(timestamp)))
-	iv := timestampHash.Sum(nil)
-	aesStream := crypto.NewAesEncryptionStream(account.ID.CmdKey(), iv)
+	iv := hashTimestamp(md5.New(), timestamp)
+	aesStream := crypto.NewAesEncryptionStream(account.ID.CmdKey(), iv[:])
 	aesStream.XORKeyStream(buffer.Bytes(), buffer.Bytes())
 	common.Must2(writer.Write(buffer.Bytes()))
 	return nil
@@ -116,7 +104,7 @@ func (c *ClientSession) EncodeRequestBody(request *protocol.RequestHeader, write
 	if request.Option.Has(protocol.RequestOptionChunkMasking) {
 		sizeParser = NewShakeSizeParser(c.requestBodyIV[:])
 	}
-	var padding crypto.PaddingLengthGenerator = nil
+	var padding crypto.PaddingLengthGenerator
 	if request.Option.Has(protocol.RequestOptionGlobalPadding) {
 		padding = sizeParser.(crypto.PaddingLengthGenerator)
 	}
@@ -150,9 +138,7 @@ func (c *ClientSession) EncodeRequestBody(request *protocol.RequestHeader, write
 
 		return &buf.SequentialWriter{Writer: cryptionWriter}
 	case protocol.SecurityType_AES128_GCM:
-		block, _ := aes.NewCipher(c.requestBodyKey[:])
-		aead, _ := cipher.NewGCM(block)
-
+		aead := crypto.NewAesGcm(c.requestBodyKey[:])
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,
 			NonceGenerator:          GenerateChunkNonce(c.requestBodyIV[:], uint32(aead.NonceSize())),
@@ -160,7 +146,8 @@ func (c *ClientSession) EncodeRequestBody(request *protocol.RequestHeader, write
 		}
 		return crypto.NewAuthenticationWriter(auth, sizeParser, writer, request.Command.TransferType(), padding)
 	case protocol.SecurityType_CHACHA20_POLY1305:
-		aead, _ := chacha20poly1305.New(GenerateChacha20Poly1305Key(c.requestBodyKey[:]))
+		aead, err := chacha20poly1305.New(GenerateChacha20Poly1305Key(c.requestBodyKey[:]))
+		common.Must(err)
 
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,
@@ -177,10 +164,10 @@ func (c *ClientSession) DecodeResponseHeader(reader io.Reader) (*protocol.Respon
 	aesStream := crypto.NewAesDecryptionStream(c.responseBodyKey[:], c.responseBodyIV[:])
 	c.responseReader = crypto.NewCryptionReader(aesStream, reader)
 
-	buffer := buf.New()
+	buffer := buf.StackNew()
 	defer buffer.Release()
 
-	if err := buffer.AppendSupplier(buf.ReadFullFrom(c.responseReader, 4)); err != nil {
+	if _, err := buffer.ReadFullFrom(c.responseReader, 4); err != nil {
 		return nil, newError("failed to read response header").Base(err)
 	}
 
@@ -196,7 +183,8 @@ func (c *ClientSession) DecodeResponseHeader(reader io.Reader) (*protocol.Respon
 		cmdID := buffer.Byte(2)
 		dataLen := int32(buffer.Byte(3))
 
-		if err := buffer.Reset(buf.ReadFullFrom(c.responseReader, dataLen)); err != nil {
+		buffer.Clear()
+		if _, err := buffer.ReadFullFrom(c.responseReader, dataLen); err != nil {
 			return nil, newError("failed to read response command").Base(err)
 		}
 		command, err := UnmarshalCommand(cmdID, buffer.Bytes())
@@ -213,7 +201,7 @@ func (c *ClientSession) DecodeResponseBody(request *protocol.RequestHeader, read
 	if request.Option.Has(protocol.RequestOptionChunkMasking) {
 		sizeParser = NewShakeSizeParser(c.responseBodyIV[:])
 	}
-	var padding crypto.PaddingLengthGenerator = nil
+	var padding crypto.PaddingLengthGenerator
 	if request.Option.Has(protocol.RequestOptionGlobalPadding) {
 		padding = sizeParser.(crypto.PaddingLengthGenerator)
 	}
@@ -247,8 +235,7 @@ func (c *ClientSession) DecodeResponseBody(request *protocol.RequestHeader, read
 
 		return buf.NewReader(c.responseReader)
 	case protocol.SecurityType_AES128_GCM:
-		block, _ := aes.NewCipher(c.responseBodyKey[:])
-		aead, _ := cipher.NewGCM(block)
+		aead := crypto.NewAesGcm(c.responseBodyKey[:])
 
 		auth := &crypto.AEADAuthenticator{
 			AEAD:                    aead,
@@ -274,7 +261,7 @@ func GenerateChunkNonce(nonce []byte, size uint32) crypto.BytesGenerator {
 	c := append([]byte(nil), nonce...)
 	count := uint16(0)
 	return func() []byte {
-		serial.Uint16ToBytes(count, c[:0])
+		binary.BigEndian.PutUint16(c, count)
 		count++
 		return c[:size]
 	}

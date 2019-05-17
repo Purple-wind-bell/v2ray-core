@@ -7,8 +7,8 @@ import (
 
 	"v2ray.com/core"
 	"v2ray.com/core/app/proxyman"
-	"v2ray.com/core/app/proxyman/mux"
 	"v2ray.com/core/common/dice"
+	"v2ray.com/core/common/mux"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/task"
 	"v2ray.com/core/proxy"
@@ -44,6 +44,15 @@ func NewDynamicInboundHandler(ctx context.Context, tag string, receiverConfig *p
 	mss, err := internet.ToMemoryStreamConfig(receiverConfig.StreamSettings)
 	if err != nil {
 		return nil, newError("failed to parse stream settings").Base(err).AtWarning()
+	}
+	if receiverConfig.ReceiveOriginalDestination {
+		if mss.SocketSettings == nil {
+			mss.SocketSettings = &internet.SocketConfig{}
+		}
+		if mss.SocketSettings.Tproxy == internet.SocketConfig_Off {
+			mss.SocketSettings.Tproxy = internet.SocketConfig_Redirect
+		}
+		mss.SocketSettings.ReceiveOriginalDestAddress = true
 	}
 
 	h.streamSettings = mss
@@ -113,7 +122,7 @@ func (h *DynamicInboundHandler) refresh() error {
 		}
 		p := rawProxy.(proxy.Inbound)
 		nl := p.Network()
-		if nl.HasNetwork(net.Network_TCP) {
+		if net.HasNetwork(nl, net.Network_TCP) {
 			worker := &tcpWorker{
 				tag:             h.tag,
 				address:         address,
@@ -133,16 +142,16 @@ func (h *DynamicInboundHandler) refresh() error {
 			workers = append(workers, worker)
 		}
 
-		if nl.HasNetwork(net.Network_UDP) {
+		if net.HasNetwork(nl, net.Network_UDP) {
 			worker := &udpWorker{
 				tag:             h.tag,
 				proxy:           p,
 				address:         address,
 				port:            port,
-				recvOrigDest:    h.receiverConfig.ReceiveOriginalDestination,
 				dispatcher:      h.mux,
 				uplinkCounter:   uplinkCounter,
 				downlinkCounter: downlinkCounter,
+				stream:          h.streamSettings,
 			}
 			if err := worker.Start(); err != nil {
 				newError("failed to create UDP worker").Base(err).AtWarning().WriteToLog()

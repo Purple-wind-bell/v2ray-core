@@ -5,8 +5,11 @@ import (
 )
 
 const (
-	TCP_FASTOPEN        = 0x105
+	// TCP_FASTOPEN is the socket option on darwin for TCP fast open.
+	TCP_FASTOPEN = 0x105
+	// TCP_FASTOPEN_SERVER is the value to enable TCP fast open on darwin for server connections.
 	TCP_FASTOPEN_SERVER = 0x01
+	// TCP_FASTOPEN_CLIENT is the value to enable TCP fast open on darwin for client connections.
 	TCP_FASTOPEN_CLIENT = 0x02
 )
 
@@ -41,5 +44,9 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 		}
 	}
 
+	return nil
+}
+
+func bindAddr(fd uintptr, address []byte, port uint32) error {
 	return nil
 }
